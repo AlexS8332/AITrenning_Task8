@@ -21,6 +21,7 @@ for (const id of [
   'history-dir', 'server-started', 'new-button', 'conversations', 'conversations-empty',
   'thread-title', 'thread-meta', 'file-button', 'delete-button', 'thread', 'thread-empty',
   'composer', 'text', 'send-button', 'error', 'start-button',
+  'growth-box', 'growth-meta', 'growth-body',
   'new-dialog', 'new-close', 'new-create', 'agent-choice',
   'log-note', 'turn-status', 'show-tools', 'show-llm', 'log', 'totals',
   'prompt-box', 'prompt-agent', 'prompt-meta', 'prompt-body',
@@ -233,6 +234,7 @@ function openNew() {
   el.threadMeta.textContent = '';
   el.fileButton.hidden = true;
   el.deleteButton.hidden = true;
+  el.growthBox.hidden = true;
   el.composer.hidden = true;
   el.thread.innerHTML = '';
   el.thread.appendChild(el.threadEmpty);
@@ -280,13 +282,13 @@ function currentTurn() {
   if (state.live && state.live.view.id === state.selectedTurn) {
     return { live: true, id: state.live.view.id, status: state.live.view.status, agentKey: state.live.view.agentKey,
       started: state.live.view.started, totals: state.live.view.totals, events: state.live.events,
-      history: state.live.view.history, saveError: state.live.view.saveError };
+      history: state.live.view.history, saveError: state.live.view.saveError, context: state.live.view.context };
   }
   if (!state.current) return null;
   const t = state.current.turns.find((x) => x.id === state.selectedTurn);
   if (!t) return null;
   return { live: false, id: t.id, status: t.status, agentKey: state.current.agentKey, started: t.started,
-    totals: t.totals, events: t.events || [], saveError: '' };
+    totals: t.totals, events: t.events || [], saveError: '', context: t.context };
 }
 
 /* ---------- Отправка ---------- */
@@ -380,6 +382,8 @@ function renderThread() {
   el.threadTitle.textContent = d.title || 'Новый диалог';
   el.threadMeta.textContent = (info ? info.title : d.agentKey) + ' · ' + d.model + ' · ' +
     plural(d.messages.length, 'сообщение', 'сообщения', 'сообщений') + ' в истории, ≈' + kilo(d.runes) + ' символов';
+
+  renderGrowth(d);
 
   let restartShown = false;
   for (const t of d.turns) {
@@ -567,9 +571,19 @@ function appendEvent(ev) {
     const u = document.createElement('span');
     u.className = 'usage';
     let text = ev.usage.prompt + '→' + ev.usage.completion + ' ток.';
+    // Оценка до отправки рядом с фактом: видно, промахнулись или нет.
+    if (ev.tokens && ev.tokens.estimated) {
+      text = '≈' + ev.tokens.estimated + ' / ' + text;
+      if (ev.tokens.errorPct) text += ' (' + signedPct(ev.tokens.errorPct) + ')';
+    }
     if (ev.usage.cacheHit) text += ' · кэш ' + ev.usage.cacheHit;
     if (ev.seconds) text += ' · ' + ev.seconds.toFixed(1) + 'с';
     u.textContent = text;
+    line.appendChild(u);
+  } else if (ev.tokens && ev.tokens.estimated) {
+    const u = document.createElement('span');
+    u.className = 'usage';
+    u.textContent = '≈' + ev.tokens.estimated + ' ток. в запросе';
     line.appendChild(u);
   } else if (ev.seconds && ev.kind !== 'agent.start') {
     const u = document.createElement('span');
@@ -607,8 +621,10 @@ function renderPrompt(ev) {
   el.promptAgent.textContent = ev.agent;
   el.promptAgent.dataset.agent = ev.agent;
   const tools = p && p.tools ? p.tools : [];
+  const est = p && p.estimate ? p.estimate : null;
   el.promptMeta.textContent = 'промпт хода · истории: ' + (p ? p.history : '?') + ' сообщ., ≈' + kilo(p ? p.historyRunes : 0) +
-    ' символов · ' + (tools.length ? 'инструментов: ' + tools.length : 'без инструментов');
+    ' символов · ' + (tools.length ? 'инструментов: ' + tools.length : 'без инструментов') +
+    (est ? ' · ≈' + kilo(est.total) + ' токенов' : '');
 
   const body = el.promptBody;
   body.innerHTML = '';
@@ -618,6 +634,7 @@ function renderPrompt(ev) {
     body.appendChild(pre);
     return;
   }
+  if (est) body.appendChild(tokenSplit(est, p.limit));
   promptBlock(body, 'Сообщение system', p.system);
   promptBlock(body, 'История прошлых ходов', p.history + ' сообщ. в порядке диалога: user, assistant, tool… (ответы инструментов прошлых ходов могут быть сокращены)');
   promptBlock(body, 'Новое сообщение user', p.user);
@@ -636,6 +653,51 @@ function renderPrompt(ev) {
     }
     body.appendChild(ul);
   }
+}
+
+// tokenSplit — из чего сложился контекст запроса. Полоска показывает
+// доли: обычно почти всё место занимает история, и это и есть ответ на
+// вопрос, почему длинный диалог дороже короткого при том же вопросе.
+function tokenSplit(est, limit) {
+  const box = document.createElement('div');
+  box.className = 'token-split';
+
+  const h = document.createElement('h4');
+  h.textContent = 'Оценка запроса: ≈' + est.total + ' токенов' +
+    (limit ? ' при лимите ' + limit + ' (' + Math.round(100 * est.total / limit) + '%)' : '');
+  box.appendChild(h);
+
+  const parts = [
+    ['history', 'история', est.history],
+    ['tools', 'инструменты', est.tools],
+    ['system', 'системный промпт', est.system],
+    ['user', 'новое сообщение', est.user]
+  ].filter((p) => p[2] > 0);
+  const sum = parts.reduce((a, p) => a + p[2], 0) || 1;
+
+  const bar = document.createElement('div');
+  bar.className = 'split-bar';
+  for (const [cls, label, value] of parts) {
+    const seg = document.createElement('span');
+    seg.className = 'seg ' + cls;
+    seg.style.width = (100 * value / sum) + '%';
+    seg.title = label + ': ≈' + value + ' токенов';
+    bar.appendChild(seg);
+  }
+  box.appendChild(bar);
+
+  const legend = document.createElement('ul');
+  legend.className = 'split-legend';
+  for (const [cls, label, value] of parts) {
+    const li = document.createElement('li');
+    const dot = document.createElement('span');
+    dot.className = 'seg ' + cls;
+    li.appendChild(dot);
+    li.appendChild(document.createTextNode(label + ' — ≈' + value + ' (' + Math.round(100 * value / sum) + '%)'));
+    legend.appendChild(li);
+  }
+  box.appendChild(legend);
+  return box;
 }
 
 function promptBlock(box, title, text) {
@@ -676,6 +738,16 @@ function renderTotals(turn) {
     ['токены', (u.prompt || 0) + '→' + (u.completion || 0)]
   ];
   if (u.cacheHit) parts.push(['из кэша', u.cacheHit + ' (' + Math.round(100 * u.cacheHit / Math.max(1, u.prompt)) + '%)']);
+  const c = turn.context;
+  if (c && c.estimate && c.estimate.total) {
+    let text = '≈' + c.estimate.total;
+    // Факт первого запроса — то единственное, с чем оценка сравнима:
+    // дальше в ходе к контексту добавляются ответы инструментов.
+    if (c.firstPrompt) text += ' против ' + c.firstPrompt + ' (' + signedPct((c.estimate.total - c.firstPrompt) / c.firstPrompt * 100) + ')';
+    parts.push(['оценка контекста', text]);
+  }
+  if (c && c.peak && c.estimate && c.peak > c.estimate.total) parts.push(['пик внутри хода', '≈' + c.peak]);
+  if (c && c.trimmed) parts.push(['выброшено из истории', plural(c.trimmed, 'сообщение', 'сообщения', 'сообщений')]);
   if (t.cost && t.cost.known) parts.push(['стоимость', formatUSD(t.cost.usd) + ' (' + t.cost.tariff + ')']);
   el.totals.innerHTML = '';
   for (const [k, val] of parts) {
@@ -692,6 +764,180 @@ function renderTotals(turn) {
     span.textContent = 'история не записана: ' + turn.saveError;
     el.totals.appendChild(span);
   }
+}
+
+/* ---------- Рост токенов и стоимости ---------- */
+
+const SVG = 'http://www.w3.org/2000/svg';
+
+// renderGrowth показывает, как растут контекст и деньги по мере диалога.
+// Главное здесь то, что видно не сразу: короткие вопросы не значат
+// дешёвые ходы. Историю модель получает заново на каждом ходе, поэтому
+// столбик контекста растёт, даже когда сам вопрос — три слова.
+function renderGrowth(d) {
+  const turns = (d && d.turns ? d.turns : []).filter((t) => t.totals && t.totals.usage);
+  el.growthBox.hidden = turns.length === 0;
+  if (!turns.length) return;
+
+  let totalIn = 0, totalOut = 0, totalCost = 0, costKnown = true;
+  const rows = turns.map((t, i) => {
+    const u = t.totals.usage || {};
+    const c = t.context || {};
+    totalIn += u.prompt || 0;
+    totalOut += u.completion || 0;
+    if (t.totals.cost && t.totals.cost.known) totalCost += t.totals.cost.usd;
+    else costKnown = false;
+    return {
+      n: i + 1,
+      estimate: (c.estimate && c.estimate.total) || 0,
+      actual: c.firstPrompt || 0,
+      prompt: u.prompt || 0,
+      completion: u.completion || 0,
+      cacheHit: u.cacheHit || 0,
+      cost: t.totals.cost && t.totals.cost.known ? t.totals.cost.usd : null,
+      cumulative: costKnown ? totalCost : null,
+      trimmed: c.trimmed || 0
+    };
+  });
+
+  el.growthMeta.textContent = 'рост токенов и стоимости · ходов: ' + rows.length +
+    ' · всего ' + kilo(totalIn) + ' токенов на вход, ' + kilo(totalOut) + ' на выход' +
+    (costKnown ? ' · ' + formatUSD(totalCost) : '');
+
+  const body = el.growthBody;
+  body.innerHTML = '';
+  body.appendChild(growthChart(rows));
+  body.appendChild(growthTable(rows));
+
+  const hint = document.createElement('p');
+  hint.className = 'hint';
+  hint.textContent = 'Столбик — токены запроса за ход (вся история заново), линия — накопленная стоимость диалога. ' +
+    'Оценка считается до отправки, факт приходит в usage ответа.';
+  body.appendChild(hint);
+}
+
+// growthChart — столбики токенов и линия накопленной стоимости. Рисуется
+// вручную в SVG: одна картинка не стоит того, чтобы тащить библиотеку.
+function growthChart(rows) {
+  const W = 640, H = 200, padL = 46, padR = 46, padT = 12, padB = 26;
+  const maxTok = Math.max(...rows.map((r) => r.prompt), 1);
+  const maxCost = Math.max(...rows.map((r) => r.cumulative || 0), 1e-9);
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const step = plotW / rows.length;
+  const barW = Math.max(2, Math.min(38, step * 0.6));
+
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('class', 'chart');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'токены и стоимость по ходам диалога');
+
+  // Ось токенов слева: ноль, середина, максимум.
+  for (const part of [0, 0.5, 1]) {
+    const y = padT + plotH - plotH * part;
+    const line = document.createElementNS(SVG, 'line');
+    line.setAttribute('x1', padL); line.setAttribute('x2', W - padR);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('class', part === 0 ? 'axis' : 'grid');
+    svg.appendChild(line);
+
+    svg.appendChild(chartText(padL - 6, y + 4, kilo(Math.round(maxTok * part)), 'end', 'tick'));
+    if (part > 0) {
+      svg.appendChild(chartText(W - padR + 6, y + 4, formatUSD(maxCost * part), 'start', 'tick cost'));
+    }
+  }
+
+  rows.forEach((r, i) => {
+    const x = padL + step * i + (step - barW) / 2;
+    const h = plotH * (r.prompt / maxTok);
+    const bar = document.createElementNS(SVG, 'rect');
+    bar.setAttribute('x', x); bar.setAttribute('y', padT + plotH - h);
+    bar.setAttribute('width', barW); bar.setAttribute('height', Math.max(1, h));
+    bar.setAttribute('class', 'bar');
+    const title = document.createElementNS(SVG, 'title');
+    title.textContent = `ход ${r.n}: ${r.prompt} токенов на вход, ${r.completion} на выход`;
+    bar.appendChild(title);
+    svg.appendChild(bar);
+
+    // Доля из кэша — она почти ничего не стоит, и это видно по линии денег.
+    if (r.cacheHit) {
+      const ch = plotH * (r.cacheHit / maxTok);
+      const hit = document.createElementNS(SVG, 'rect');
+      hit.setAttribute('x', x); hit.setAttribute('y', padT + plotH - ch);
+      hit.setAttribute('width', barW); hit.setAttribute('height', Math.max(1, ch));
+      hit.setAttribute('class', 'bar cached');
+      const t2 = document.createElementNS(SVG, 'title');
+      t2.textContent = `ход ${r.n}: из кэша ${r.cacheHit} токенов`;
+      hit.appendChild(t2);
+      svg.appendChild(hit);
+    }
+
+    if (rows.length <= 12 || (i + 1) % 5 === 0) {
+      svg.appendChild(chartText(padL + step * i + step / 2, H - 8, String(r.n), 'middle', 'tick'));
+    }
+  });
+
+  const points = rows
+    .map((r, i) => (r.cumulative === null ? null : [padL + step * i + step / 2, padT + plotH - plotH * (r.cumulative / maxCost)]))
+    .filter(Boolean);
+  if (points.length > 1) {
+    const path = document.createElementNS(SVG, 'polyline');
+    path.setAttribute('points', points.map((p) => p.join(',')).join(' '));
+    path.setAttribute('class', 'costline');
+    svg.appendChild(path);
+  }
+  for (const p of points) {
+    const dot = document.createElementNS(SVG, 'circle');
+    dot.setAttribute('cx', p[0]); dot.setAttribute('cy', p[1]); dot.setAttribute('r', 2.5);
+    dot.setAttribute('class', 'costdot');
+    svg.appendChild(dot);
+  }
+  return svg;
+}
+
+function chartText(x, y, text, anchor, cls) {
+  const t = document.createElementNS(SVG, 'text');
+  t.setAttribute('x', x); t.setAttribute('y', y);
+  t.setAttribute('text-anchor', anchor);
+  t.setAttribute('class', cls);
+  t.textContent = text;
+  return t;
+}
+
+// growthTable — те же числа, но точные: картинка показывает форму роста,
+// таблица отвечает на вопрос «сколько именно».
+function growthTable(rows) {
+  const table = document.createElement('table');
+  table.className = 'growth-table';
+  const head = document.createElement('tr');
+  for (const h of ['ход', 'оценка', 'факт', 'вход', 'из кэша', 'выход', 'ход стоил', 'всего']) {
+    const th = document.createElement('th');
+    th.textContent = h;
+    head.appendChild(th);
+  }
+  table.appendChild(head);
+
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const err = r.actual ? Math.round((r.estimate - r.actual) / r.actual * 100) : null;
+    const cells = [
+      String(r.n) + (r.trimmed ? ' ✂' : ''),
+      r.estimate ? '≈' + r.estimate : '—',
+      r.actual ? String(r.actual) + (err === null ? '' : ' (' + (err > 0 ? '+' : '') + err + '%)') : '—',
+      String(r.prompt),
+      r.cacheHit ? String(r.cacheHit) : '—',
+      String(r.completion),
+      r.cost === null ? '—' : formatUSD(r.cost),
+      r.cumulative === null ? '—' : formatUSD(r.cumulative)
+    ];
+    for (const c of cells) {
+      const td = document.createElement('td');
+      td.textContent = c;
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  return table;
 }
 
 /* ---------- Файл и удаление ---------- */
@@ -767,6 +1013,13 @@ function formatTime(d) {
 function kilo(n) {
   n = n || 0;
   return n < 1000 ? String(n) : (n / 1000).toFixed(1) + ' тыс.';
+}
+
+// signedPct — расхождение оценки с фактом со знаком: плюс значит, что
+// оценка завысила.
+function signedPct(pct) {
+  const rounded = Math.round(pct);
+  return (rounded > 0 ? '+' : '') + rounded + '%';
 }
 
 function plural(n, one, few, many) {
