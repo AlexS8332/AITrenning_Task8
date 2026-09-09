@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Агент с памятью между запусками</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/vendor/marked/marked.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Агент с памятью между запусками</h1>
+    <p class="lead">
+      Диалог с агентом-справочником по животным. История каждого диалога хранится в
+      JSON-файле в том виде, в каком её получает модель, и после перезапуска сервера
+      поднимается обратно: диалог продолжается с того места, где остановился.
+    </p>
+    <dl class="facts">
+      <div><dt>Каталог истории</dt><dd id="history-dir">—</dd></div>
+      <div><dt>Сервер запущен</dt><dd id="server-started">—</dd></div>
+    </dl>
+  </header>
+
+  <main class="layout">
+    <!-- Слева список диалогов с диска, в центре лента сообщений, справа
+         журнал выбранного хода. Панели обновляются независимо. -->
+    <aside class="panel side-panel">
+      <div class="section-head">
+        <h2>Диалоги</h2>
+        <button type="button" id="new-button" class="secondary compact">Новый</button>
+      </div>
+      <ul class="conversations" id="conversations"></ul>
+      <p class="empty" id="conversations-empty" hidden>Диалогов пока нет: нажмите «Новый».</p>
+    </aside>
+
+    <section class="panel thread-panel">
+      <div class="section-head">
+        <h2 id="thread-title">Новый диалог</h2>
+        <span class="section-note" id="thread-meta"></span>
+        <div class="buttons compact">
+          <button type="button" id="file-button" class="secondary compact" hidden>Показать файл</button>
+          <button type="button" id="delete-button" class="secondary compact danger" hidden>Удалить</button>
+        </div>
+      </div>
+
+      <div class="thread" id="thread">
+        <div class="empty-state" id="thread-empty">
+          <p class="empty">Выберите диалог слева или начните новый: сначала тип агента, потом первое сообщение.</p>
+          <button type="button" id="start-button" class="primary">Начать новый диалог</button>
+        </div>
+      </div>
+
+      <!-- Только сообщение: тип агента выбран при создании диалога и
+           хранится в нём, менять его внутри диалога нельзя. -->
+      <form class="composer" id="composer" hidden>
+        <textarea id="text" rows="3" spellcheck="true"
+          placeholder="Например: «Меня зовут Алекс. Расскажи коротко про рысь»"></textarea>
+        <div class="controls">
+          <span class="hint inline">Ctrl+Enter — отправить. Ход идёт на сервере: страницу можно перезагрузить.</span>
+          <div class="buttons">
+            <button type="submit" id="send-button" class="primary">Отправить</button>
+          </div>
+        </div>
+        <p class="error" id="error" hidden></p>
+      </form>
+    </section>
+
+    <section class="panel log-panel">
+      <div class="section-head">
+        <h2>Журнал хода</h2>
+        <span class="section-note" id="log-note">выберите ход в диалоге</span>
+      </div>
+      <div class="log-filters">
+        <span class="status" id="turn-status"></span>
+        <label class="check small"><input type="checkbox" id="show-tools" checked> инструменты</label>
+        <label class="check small"><input type="checkbox" id="show-llm" checked> модель</label>
+      </div>
+      <ol class="log" id="log"></ol>
+      <div class="totals" id="totals"></div>
+
+      <!-- Промпт хода: что получила модель на старте. Отдельно от ленты:
+           это условия задачи, а не ход работы. -->
+      <details class="prompt" id="prompt-box" hidden>
+        <summary><span class="agent" id="prompt-agent"></span><span class="meta" id="prompt-meta"></span></summary>
+        <div id="prompt-body"></div>
+      </details>
+    </section>
+  </main>
+
+  <!-- Создание диалога: тип агента выбирается здесь и только здесь. -->
+  <dialog id="new-dialog">
+    <div class="dialog-head">
+      <h2>Новый диалог</h2>
+      <button type="button" id="new-close" class="secondary">Отмена</button>
+    </div>
+    <p class="hint">Тип агента задаётся при создании и хранится в диалоге: продолжать диалог будет тот же агент.</p>
+    <div class="agent-choice" id="agent-choice"></div>
+    <div class="controls">
+      <span></span>
+      <div class="buttons"><button type="button" id="new-create" class="primary">Создать диалог</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="file-dialog">
+    <div class="dialog-head">
+      <h2>Файл диалога на диске</h2>
+      <button type="button" id="file-close" class="secondary">Закрыть</button>
+    </div>
+    <p class="hint" id="file-path">—</p>
+    <pre class="file" id="file-body"></pre>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

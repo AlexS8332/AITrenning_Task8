@@ -6,7 +6,7 @@
     "status":  "planned",
     "created":  "2026-09-09",
     "updated":  "2026-09-09",
-    "repo":  "",
+    "repo":  "https://github.com/AlexS8332/AITrenning_Task8",
     "env":  [
                 "DEEPSEEK_API_KEY"
             ],
